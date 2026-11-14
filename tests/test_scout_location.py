@@ -7,8 +7,9 @@ prospect whose place is unknown — silently, because an empty place is a
 legitimate answer for a company found some other way.
 
 These tests hold Scout to the discovery rule: the place a search was scoped to
-is the place its results are recorded in, and a company that predates the
-column gets filled in rather than left blank.
+is the place its results are recorded in, a company that predates the column
+gets filled in rather than left blank, and the priority places are worked
+through in order instead of the first one being searched forever.
 """
 
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ class FakeState:
     def __init__(self, existing=None):
         self.existing = existing
         self.filled = []
+        self.settings = {}
 
     async def company_exists(self, domain):
         return False
@@ -38,6 +40,12 @@ class FakeState:
 
     async def add_company(self, company):
         return "new-" + company.domain
+
+    async def get_setting(self, key, default=""):
+        return self.settings.get(key, default)
+
+    async def set_setting(self, key, value):
+        self.settings[key] = value
 
 
 def make_scout(priority=(NASHIK, PUNE), geography=(NASHIK, PUNE, "Ludhiana, India")):
@@ -55,21 +63,88 @@ def make_scout(priority=(NASHIK, PUNE), geography=(NASHIK, PUNE, "Ludhiana, Indi
     scout._seen_domains = set()
     scout._seen_prospect_keys = set()
     scout._queries_this_cycle = 0
+    scout._current_place = None
     return scout
 
 
-def test_a_priority_place_leads_the_company_search():
+def next_cycle(scout):
+    """What the loop does between cycles."""
+    scout._current_place = None
+
+
+# ── The query itself ──
+
+
+def test_the_search_reads_like_a_search_not_a_filter():
     scout = make_scout()
-    queries = scout._build_company_search_queries()
+    queries = scout._build_company_search_queries(NASHIK)
     assert queries, "expected at least one search"
-    assert queries[0][1] == NASHIK
-    assert all(place == NASHIK for _, place in queries)
+    query, place = queries[0]
+    assert place == NASHIK
+    assert "Nashik" in query
+    # Quoted AND-ed terms are what came back as dictionary entries for the
+    # word "manufacturing" from every backend.
+    assert '"' not in query
 
 
-def test_without_a_priority_list_the_first_place_is_searched():
+def test_a_search_carries_the_place_it_was_scoped_to():
+    scout = make_scout()
+    assert all(place == PUNE for _, place in scout._build_company_search_queries(PUNE))
+
+
+def test_no_place_leaves_the_place_blank_rather_than_guessing():
+    scout = make_scout()
+    queries = scout._build_company_search_queries("")
+    assert queries
+    assert all(place == "" for _, place in queries)
+
+
+# ── The rotation across priority places ──
+
+
+@pytest.mark.asyncio
+async def test_the_search_place_advances_through_the_priority_list():
+    scout = make_scout()
+    assert await scout._cycle_place() == NASHIK
+    next_cycle(scout)
+    assert await scout._cycle_place() == PUNE
+    next_cycle(scout)
+    assert await scout._cycle_place() == NASHIK  # wraps
+
+
+@pytest.mark.asyncio
+async def test_the_chosen_place_is_kept_for_the_whole_cycle():
+    scout = make_scout()
+    first = await scout._cycle_place()
+    # Every place-scoped strategy in one cycle must agree, or the Writer gets
+    # companies from one city while the prospects claim another.
+    assert await scout._cycle_place() == first
+    assert await scout._cycle_place() == first
+
+
+@pytest.mark.asyncio
+async def test_without_a_priority_list_the_places_still_rotate():
     scout = make_scout(priority=())
-    queries = scout._build_company_search_queries()
-    assert queries[0][1] == NASHIK  # geography[0]
+    assert await scout._cycle_place() == NASHIK  # geography[0]
+    next_cycle(scout)
+    assert await scout._cycle_place() == PUNE
+
+
+@pytest.mark.asyncio
+async def test_the_rotation_position_survives_a_restart():
+    # The loop restarts often. A counter held only in memory would put every
+    # session back on the first city.
+    scout = make_scout()
+    await scout._cycle_place()
+    state = scout.state
+
+    restarted = make_scout()
+    restarted.state = state
+    next_cycle(restarted)
+    assert await restarted._cycle_place() == PUNE
+
+
+# ── Where the result is recorded ──
 
 
 @pytest.mark.asyncio

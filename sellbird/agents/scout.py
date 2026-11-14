@@ -61,6 +61,8 @@ logger = logging.getLogger("sellbird.scout")
 MAX_QUERIES_PER_CYCLE = 3
 # Delay between search requests (seconds)
 SEARCH_DELAY = (2, 5)
+# Where the place rotation keeps its position between cycles.
+PLACE_SETTING = "scout.search_place_index"
 
 # HTTP hardening knobs
 HTTP_TIMEOUT = 15.0
@@ -158,6 +160,8 @@ class Scout:
         self._site_evidence: dict[str, dict] = {}
         self._own_domains: dict[str, bool] = {}
         self._challenged: set[str] = set()
+        # The priority place this cycle works on; chosen once per cycle.
+        self._current_place: str | None = None
 
     async def run(self):
         """Main prospecting flow: find leads matching ICP."""
@@ -169,6 +173,7 @@ class Scout:
         self._seen_domains = set()
         self._site_reads, self._site_evidence, self._own_domains = {}, {}, {}
         self._challenged = set()
+        self._current_place = None
 
         prospects_found = 0
 
@@ -915,7 +920,7 @@ class Scout:
 
         geos = list(getattr(self.config.icp, "priority_geography", None) or []) \
             or list(self.config.icp.geography or [])
-        geo = geos[0] if geos else ""
+        geo = await self._cycle_place() or (geos[0] if geos else "")
         industry = self.config.icp.industries[0] if self.config.icp.industries else ""
 
         for title in self.config.icp.titles:
@@ -1070,10 +1075,17 @@ class Scout:
         return count
 
     async def _find_companies_via_search(self) -> list[dict]:
-        """Find ICP-matching companies via web search."""
+        """Find ICP-matching companies via web search.
+
+        One priority place per cycle, rotating, so the whole list is worked
+        through in order instead of the first entry being searched forever.
+        """
         companies = []
 
-        for query, place in self._build_company_search_queries():
+        place = await self._cycle_place()
+        logger.info(f"Scout: searching for companies in {place or 'any place'}")
+
+        for query, searched_place in self._build_company_search_queries(place):
             if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
                 break
 
@@ -1096,8 +1108,8 @@ class Scout:
                 # The place the search was scoped to: what discovery would
                 # have stamped on the result, and what lets the Writer put
                 # the priority places first.
-                if place and not info.get("location"):
-                    info["location"] = place
+                if searched_place and not info.get("location"):
+                    info["location"] = searched_place
                 if not info.get("name"):
                     info["name"] = self._domain_to_name(domain)
 
@@ -1242,45 +1254,80 @@ class Scout:
         seen = set()
         return [d for d in domains if not (d in seen or seen.add(d))][:5]
 
-    def _build_company_search_queries(self) -> list[tuple[str, str]]:
+    def _build_company_search_queries(self, place: str = "") -> list[tuple[str, str]]:
         """(search query, the place it searches) for ICP-matching companies.
 
+        The queries read the way a person searches, because that is what the
+        engines answer. ``"Manufacturing" "Nashik, India" "20-500 employees"
+        company`` — quoted terms AND-ed together — comes back with the
+        dictionary entry for "manufacturing", every time, from every backend.
+        ``Manufacturing companies in Nashik, India`` comes back with
+        manufacturing companies in Nashik: real factory sites, with real
+        addresses and team pages to read.
+
         The place travels with the query, not just inside it: a company found
-        by a "Nashik" search is a Nashik company, and the Writer needs to know
-        that to work through the priority places first. Queries without a
-        place come back with "" — nothing is guessed.
+        by a Nashik search is a Nashik company, and the Writer needs to know
+        that to work through the priority places first. A query with no place
+        comes back with ``""`` — nothing is guessed.
         """
         queries: list[tuple[str, str]] = []
-        industries = self.config.icp.industries or [""]
-        geos = list(getattr(self.config.icp, "priority_geography", None) or []) \
-            or list(self.config.icp.geography or [""])
-        size = self.config.icp.company_size or ""
+        industries = [i for i in (self.config.icp.industries or []) if i][:2]
+        if not industries:
+            industries = [""]
 
-        for industry in industries[:2]:
-            geo = geos[0] if geos else ""
-
-            parts = []
-            if industry:
-                parts.append(f'"{industry}"')
-            if geo:
-                parts.append(f'"{geo}"')
-            if size:
-                parts.append(f'"{size}"')
-            parts.append("company")
-            queries.append((" ".join(parts), geo))
-
-            if geo and industry:
-                queries.append((f'top "{industry}" companies {geo}', geo))
+        for industry in industries:
+            if place and industry:
+                queries.append((f"{industry} companies in {place}", place))
+                queries.append((f"{industry} manufacturer {place} contact", place))
+            elif place:
+                queries.append((f"companies in {place}", place))
+            elif industry:
+                queries.append((f"{industry} companies", ""))
 
         # Drop empties / dupes, cap to budget.
         seen = set()
         out: list[tuple[str, str]] = []
-        for q, place in queries:
+        for q, where in queries:
             q = q.strip()
-            if q and q != "company" and q not in seen:
+            if q and q not in seen:
                 seen.add(q)
-                out.append((q, place))
+                out.append((q, where))
         return out[:3]
+
+    async def _cycle_place(self) -> str:
+        """The priority place this cycle works on; advances once per cycle.
+
+        Searching only the first priority place means the other six are never
+        prospected, however carefully they were listed — the list is a
+        priority order, not a single choice. The position is kept in settings
+        so a restart resumes where it left off instead of re-searching one city
+        forever, and it is cached for the cycle so every strategy that scopes
+        a search to a place agrees on which place that is.
+        """
+        if self._current_place is not None:
+            return self._current_place
+
+        places = list(getattr(self.config.icp, "priority_geography", None) or []) \
+            or list(self.config.icp.geography or [])
+        if not places:
+            self._current_place = ""
+            return ""
+
+        try:
+            index = int(await self.state.get_setting(PLACE_SETTING, "0") or 0)
+        except Exception as e:
+            # No settings, no rotation: search the first place rather than
+            # let a missing counter cost the cycle.
+            logger.debug(f"Scout: could not read the search place: {e}")
+            index = 0
+        index %= len(places)
+
+        self._current_place = places[index]
+        try:
+            await self.state.set_setting(PLACE_SETTING, str((index + 1) % len(places)))
+        except Exception as e:
+            logger.debug(f"Scout: could not advance the search place: {e}")
+        return self._current_place
 
     async def _resolve_email(
         self, first_name: str, last_name: str, domain: str
@@ -1989,9 +2036,7 @@ Respond ONLY with the JSON array."""
         if not keywords:
             return 0
         search_term = keywords[0]
-        geos = list(getattr(self.config.icp, "priority_geography", None) or []) \
-            or list(self.config.icp.geography or [])
-        geo = geos[0] if geos else ""
+        geo = await self._cycle_place()
 
         logger.info(f"Scout: Searching job boards for '{search_term}' roles...")
         loop = asyncio.get_event_loop()
