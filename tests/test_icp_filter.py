@@ -53,6 +53,42 @@ def test_a_real_company_page_is_a_company():
         "Acme Polymers", "https://acmepolymers.com/products/pipe-fittings")
 
 
+# Reference works, dictionaries, tutorial sites and trade press rank for
+# every industry query, so they arrive constantly — and each of these was
+# found in a live pipeline. None is a buyer: an encyclopedia does not run a
+# shopfloor, and a tutorial site does not buy scheduling software.
+@pytest.mark.parametrize("name,url", [
+    ("Encyclopedia Britannica", "https://www.britannica.com/"),
+    ("Wikipedia", "https://en.wikipedia.org/wiki/Manufacturing"),
+    ("Dictionary", "https://dictionary.cambridge.org/dictionary/english/manufacturing"),
+    ("GeeksforGeeks", "https://www.geeksforgeeks.org/business-studies/manufacturing/"),
+    ("The India Post", "https://indiapost.org/manufacturing-business-ideas-india"),
+    ("Manufacturing", "https://www.manufacturing.net/"),
+    ("Aeroleads", "https://aeroleads.com/"),
+    # A company's annual report on a document host is not that company.
+    ("Nashik MIDC Company Directory",
+     "https://www.scribd.com/document/412744280/NASHIK-MIDC-LIST"),
+    ("Company annual report",
+     "https://sec.gov/Archives/edgar/data/40704/000119312522185257/x.txt"),
+])
+def test_a_reference_work_or_publication_is_not_a_buyer(name, url):
+    assert is_content_page(name, url)
+    assert exclusion_reason({"name": name, "source_url": url})
+
+
+@pytest.mark.parametrize("name,url", [
+    ("Detmold Group", "https://www.detmoldgroup.com/"),
+    ("Menon and Menon Ltd", "https://menon.in/"),
+    ("Khosla Engineering Industries", "https://keicnc.com/"),
+    ("M&K Industries", "https://mandkindustry.com/"),
+    ("Unique Pulverizer", "https://uniquepulverizer.com/"),
+])
+def test_a_real_manufacturer_survives_the_new_rules(name, url):
+    assert not is_content_page(name, url)
+    assert exclusion_reason(
+        {"name": name, "source_url": url, "industry": "Manufacturing"}) == ""
+
+
 # ── 2. Vendors are not buyers ──────────────────────────────────────────
 
 

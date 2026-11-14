@@ -221,6 +221,65 @@ KNOWN_PUBLISHER_DOMAINS = (
     "wypages.com",
     "oswalgroup.com",
     "okcredit.in",
+    # Trade and industry press. "Manufacturing" on manufacturing.net is the
+    # name of a news site, and it entered the pipeline as though it were a
+    # manufacturer called Manufacturing.
+    "manufacturing.net",
+    "industryweek.com",
+    "themanufacturer.com",
+    "manufacturingtomorrow.com",
+    "processengineering.co.uk",
+    # Lead-generation and data vendors: they sell lists of companies, which
+    # makes them a directory with a login.
+    "aeroleads.com",
+    # Official postal and statistics services.
+    "indiapost.org",
+    "indiapost.gov.in",
+)
+
+# Reference works, dictionaries, encyclopedias and code-tutorial sites.
+# They publish pages *about* the industries we sell to, and are never the
+# businesses themselves — but they rank for every industry query, so they
+# arrive constantly. "Encyclopedia Britannica", "Dictionary",
+# "GeeksforGeeks" and "The India Post" all became prospects this way.
+REFERENCE_DOMAINS = (
+    "britannica.com",
+    "wikipedia.org",
+    "wikimedia.org",
+    "wiktionary.org",
+    "wikiwand.com",
+    "fandom.com",
+    "dictionary.com",
+    "thesaurus.com",
+    "cambridge.org",
+    "merriam-webster.com",
+    "investopedia.com",
+    "geeksforgeeks.org",
+    "w3schools.com",
+    "tutorialspoint.com",
+    "javatpoint.com",
+    "programiz.com",
+    "freecodecamp.org",
+    "howstuffworks.com",
+    # Document hosting: an annual report uploaded to one of these is not
+    # the company that wrote it.
+    "scribd.com",
+    "doczz.net",
+    "yumpu.com",
+    "issuu.com",
+    "slideshare.net",
+)
+
+# Names that only a reference work, a tutorial site or a publication gives
+# itself. Unlike a list-shaped title, none of these can be rescued by the
+# domain looking like a brand: there is no manufacturer called Wikipedia.
+REFERENCE_NAME_RE = re.compile(
+    r"\b(?:encyclopedia|encyclopaedia|britannica|wikipedia|wiktionary|"
+    r"wiki|dictionary|thesaurus|glossary|lexicon|"
+    r"tutorials?|geeksforgeeks|w3schools|tutorialspoint|javatpoint|"
+    r"programiz|freecodecamp|howstuffworks|investopedia|"
+    r"scribd|slideshare)\b",
+    re.I,
 )
 
 # Host labels that are a publisher's own name for itself. Matched as a
@@ -252,7 +311,10 @@ DIRECTORY_DOMAIN_WORDS = (
 PUBLISHER_TLDS = frozenset({"media", "news", "directory", "today"})
 
 # Colleges, universities, chambers, trade bodies: never a manufacturer.
-INSTITUTION_TLD_RE = re.compile(r"\.(ac\.in|edu\.in|gov\.in|nic\.in)$", re.I)
+# A registrar-issued suffix — .gov, .edu, .mil, .int, wherever they are —
+# is not something a factory buys, so the country suffix is optional.
+INSTITUTION_TLD_RE = re.compile(
+    r"\.(?:ac|edu|gov|nic|mil)\.[a-z]{2}$|\.(?:gov|edu|mil|int)$", re.I)
 
 INSTITUTION_NAME_RE = re.compile(
     r"\b(college|university|institute|polytechnic|school\s+of|academy|"
@@ -433,6 +495,13 @@ def _known_publisher(host: str) -> bool:
                for d in KNOWN_PUBLISHER_DOMAINS)
 
 
+def _reference_domain(host: str) -> bool:
+    """Is this domain a reference work, a tutorial site or document hosting?"""
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in REFERENCE_DOMAINS)
+
+
 def _content_farm(host: str) -> bool:
     """Does the host look like a content farm rather than a business?
 
@@ -552,6 +621,8 @@ def is_content_page(name: str, source_url: str = "", domain: str = "") -> bool:
     if host:
         if _known_publisher(host):
             return True
+        if _reference_domain(host):
+            return True
         if _content_farm(host):
             return True
         if INSTITUTION_TLD_RE.search(host):
@@ -572,6 +643,10 @@ def is_content_page(name: str, source_url: str = "", domain: str = "") -> bool:
     # A "portal" is a place that lists businesses: "MSME B2B Portal". A
     # factory does not call itself one, whatever its customer login is.
     if re.search(r"\bportals?\b", name, re.I):
+        return True
+
+    # A reference work names itself plainly, and no factory does.
+    if REFERENCE_NAME_RE.search(name):
         return True
 
     if path and PUBLICATION_PATH_RE.search(path):
